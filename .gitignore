@@ -10,6 +10,8 @@ out/
 .env
 .env.*
 .env*.local
+# template konfigurasi publik (tanpa secret) tetap boleh versioned
+!api/.env.example
 
 # credentials & private keys
 *.pem
