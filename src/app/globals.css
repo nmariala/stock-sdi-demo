@@ -1,0 +1,49 @@
+@import 'tailwindcss';
+
+/* Stock table: grouped header + sticky header + content-width columns */
+.stock-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: max-content;
+  min-width: 100%;
+}
+
+.stock-table th,
+.stock-table td {
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.stock-table thead th {
+  position: sticky;
+  background: #f8fafc;
+  z-index: 1;
+}
+
+.stock-table thead tr:first-child th {
+  top: 0;
+  height: 42px;
+  z-index: 3;
+}
+
+.stock-table thead tr:last-child th {
+  top: 42px;
+  height: 34px;
+  z-index: 2;
+}
+
+.stock-table tbody td {
+  background: #fff;
+}
+
+.stock-table.vborders th:not(:first-child),
+.stock-table.vborders td:not(:first-child) {
+  border-left: 1px solid #e2e8f0;
+}
+
+.stock-table tbody tr:hover td {
+  background: #f1f5f9;
+}
+
+.stock-table td.num {
+  font-variant-numeric: tabular-nums;
+}

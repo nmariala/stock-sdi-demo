@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# build output & cache
+.next/
+out/
+*.tsbuildinfo
+
+# environment files
+.env
+.env.*
+.env*.local
+
+# credentials & private keys
+*.pem
+*.p8
+*.p12
+*.pfx
+*.key
