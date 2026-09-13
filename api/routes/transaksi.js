@@ -12,8 +12,12 @@ const {
   validateTransaksiBody,
   MIN_PAGE,
 } = require("../utils/validation");
+const { requireAuth, requireRole } = require("../middleware/auth");
 
 const router = express.Router();
+
+// Semua endpoint transaksi butuh sesi valid (tulis khusus staff).
+router.use(requireAuth);
 
 const TRANS_COLS = `
   t.id, t.barang_id, t.user_id, t.jenis, t.jumlah, t.created_at,
@@ -145,22 +149,23 @@ router.get("/:id/balance-before", async (req, res, next) => {
   }
 });
 
-// POST /api/transaksi
+// POST /api/transaksi  (khusus staff)
 // Hanya INSERT; semua validasi stock, update stok & stock_levels, serta
 // deteksi client_tx_id ganda ditangani trigger PostgreSQL (berlaku juga
-// untuk transaksi yang masuk lewat jalur lain).
-router.post("/", async (req, res, next) => {
+// untuk transaksi yang masuk lewat jalur lain). user_id diisi dari sesi aktif.
+router.post("/", requireRole("staff"), async (req, res, next) => {
   try {
     const v = validateTransaksiBody(req.body);
+    const userId = req.auth.user.profileId;
 
     let rows;
     try {
       const result = await pool.query(
         `INSERT INTO public.transaksi
-           (barang_id, jenis, jumlah, warehouse, kriteria, keterangan, client_tx_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+           (barang_id, jenis, jumlah, warehouse, kriteria, keterangan, client_tx_id, user_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING id, barang_id, user_id, jenis, jumlah, created_at, warehouse, kriteria, keterangan, client_tx_id`,
-        [v.barangId, v.jenis, v.jumlah, v.warehouse, v.kriteria, v.keterangan, v.clientTxId]
+        [v.barangId, v.jenis, v.jumlah, v.warehouse, v.kriteria, v.keterangan, v.clientTxId, userId]
       );
       rows = result.rows;
     } catch (err) {

@@ -6,23 +6,23 @@ import { AuthProvider, useAuth } from '@/lib/auth';
 import { isGuestRole, isGuestAllowedPath } from '@/lib/roles';
 
 function AuthGate({ children }: { children: React.ReactNode }) {
-  const { session, profile, loading } = useAuth();
+  const { user, profile, loading } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
     if (loading) return;
-    if (!session && pathname !== '/login') {
+    if (!user && pathname !== '/login') {
       router.replace('/login');
-    } else if (session && pathname === '/login') {
+    } else if (user && pathname === '/login') {
       router.replace('/');
-    } else if (session && isGuestRole(profile?.role) && !isGuestAllowedPath(pathname)) {
+    } else if (user && isGuestRole(profile?.role) && !isGuestAllowedPath(pathname)) {
       router.replace('/');
     } else {
       setReady(true);
     }
-  }, [session, profile, loading, pathname, router]);
+  }, [user, profile, loading, pathname, router]);
 
   if (loading) {
     return (
@@ -32,8 +32,8 @@ function AuthGate({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (!session && pathname !== '/login') return null;
-  if (session && pathname === '/login') return null;
+  if (!user && pathname !== '/login') return null;
+  if (user && pathname === '/login') return null;
   if (!ready) return null;
 
   return <>{children}</>;

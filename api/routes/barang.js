@@ -16,8 +16,12 @@ const {
   MIN_PAGE,
   DEFAULT_PAGE_SIZE,
 } = require("../utils/validation");
+const { requireAuth, requireRole } = require("../middleware/auth");
 
 const router = express.Router();
+
+// Semua endpoint barang butuh sesi valid (staff untuk tulis).
+router.use(requireAuth);
 
 const BARANG_COLS = "b.id, b.nama, b.stok, b.updated_at";
 
@@ -73,8 +77,8 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
-// POST /api/barang  -> body: { nama, stok? }
-router.post("/", async (req, res, next) => {
+// POST /api/barang  -> body: { nama, stok? }  (khusus staff)
+router.post("/", requireRole("staff"), async (req, res, next) => {
   try {
     const body = req.body || {};
     const nama = trimOrNull(body.nama, 200);
@@ -108,8 +112,8 @@ router.post("/", async (req, res, next) => {
   }
 });
 
-// PATCH /api/barang/:id  -> body: { nama }
-router.patch("/:id", async (req, res, next) => {
+// PATCH /api/barang/:id  -> body: { nama }  (khusus staff)
+router.patch("/:id", requireRole("staff"), async (req, res, next) => {
   try {
     const id = parseId(req);
     const nama = trimOrNull((req.body || {}).nama, 200);
@@ -135,8 +139,8 @@ router.patch("/:id", async (req, res, next) => {
   }
 });
 
-// DELETE /api/barang/:id
-router.delete("/:id", async (req, res, next) => {
+// DELETE /api/barang/:id  (khusus staff)
+router.delete("/:id", requireRole("staff"), async (req, res, next) => {
   try {
     const id = parseId(req);
 

@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth';
 import { GUEST_USERNAME } from '@/lib/roles';
 
-const EMAIL_SUFFIX = '@durian.sdi';
 const REMEMBER_USERNAME_KEY = 'sdi_remembered_username';
 
 type LoginMode = 'staff' | 'tamu';
@@ -37,13 +36,14 @@ export default function LoginPage() {
     }
   }, []);
 
-  const resolveEmail = (): string => {
+  const resolveUsername = (): string => {
+    // Username custom (bukan email Supabase). Legacy suffix @durian.sdi
+    // (jika ter-ingat dari versi lama) di-strip untuk kenyamanan.
+    const stripLegacy = (s: string) => s.replace(/@durian\.sdi$/i, '');
     if (mode === 'tamu') {
-      const g = GUEST_USERNAME.trim().toLowerCase();
-      return g.endsWith(EMAIL_SUFFIX) ? g : `${g}${EMAIL_SUFFIX}`;
+      return stripLegacy(GUEST_USERNAME.trim().toLowerCase());
     }
-    const raw = username.trim().toLowerCase();
-    return raw.endsWith(EMAIL_SUFFIX) ? raw : `${raw}${EMAIL_SUFFIX}`;
+    return stripLegacy(username.trim().toLowerCase());
   };
 
   const handleSubmit = async (e: FormEvent) => {
@@ -59,7 +59,7 @@ export default function LoginPage() {
     setLoading(true);
     setError('');
     try {
-      const result = await signIn(resolveEmail(), password);
+      const result = await signIn(resolveUsername(), password);
       if (result.error) {
         setError(result.error);
         return;

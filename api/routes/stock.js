@@ -4,7 +4,12 @@ const express = require("express");
 const { pool } = require("../db");
 const { trimOrNull, escapeLike, parseEnum, parseOptionalId } = require("../utils/validation");
 
+const { requireAuth } = require("../middleware/auth");
+
 const router = express.Router();
+
+// Semua endpoint stock butuh sesi valid.
+router.use(requireAuth);
 
 // GET /api/stock?warehouse=&kriteria=&barang_id=&search=
 // Data tingkat stok per barang diambil langsung dari stock_levels + barang

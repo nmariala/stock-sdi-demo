@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { supabase } from '@/lib/auth';
+import { supabase } from '@/lib/supabase';
 import { GUDANG, KRITERIA } from '@/lib/konstanta';
 import { formatQuantity } from '@/lib/format';
 import {

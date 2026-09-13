@@ -19,3 +19,7 @@ out/
 *.p12
 *.pfx
 *.key
+
+# auth credentials file (useradmin.js) - jangan pernah commit
+api/.demo-users.json
+api/.demo-users

@@ -5,26 +5,42 @@
 // Penggunaan: node smoke.mjs  [harus dijalankan dari /home/nugie/stock-sdi-api]
 //
 // Cakupan:
-//   - health check & koneksi DB
+//   - health check & koneksi DB (publik)
+//   - AUTHENTICATION + AUTHORIZATION (custom, HttpOnly cookie)
+//       . login valid / salah password / username tak dikenal / body tak valid
+//       . atribut cookie (HttpOnly, SameSite=Lax, Path=/, Secure console dev)
+//       . /api/auth/me (200 valid, 401 tanpa sesi / token tak dikenal / expired)
+//       . sesi bertahan antar request; logout mematikan sesi
+//       . read endpoints: 401 tanpa sesi
+//       . rule guest: read 200, write 403
+//       . rule staff: write 201
+//       . rate limit login (429 setelah N percobaan gagal)
+//       . tidak ada password/hash/token mentah yang bocor di respons
+//       . DB down → 500 DATABASE_ERROR tanpa bocor SQL/kredensial
 //   - read baseline (barang/stok/transaksi; konsistensi stok vs stock_levels)
 //   - filter transaksi (jenis, barang_id, range tanggal) & balance-before
-//   - validasi input + error paths (400/404/409, INAGOK/DUPLICATE/idempotent)
+//   - validasi input + error paths (400/404/409, idempotent client_tx_id)
 //   - round-trip CRUD barang + transaksi throwaway (cleanup otomatis)
 //   - skenario koneksi DB gagal (instance dengan kredensial salah, port 3102)
 //   - verifikasi baseline kembali utuh setelah cleanup
 
 import { spawn, execFileSync } from "node:child_process";
 import process from "node:process";
+import fs from "node:fs";
+import path from "node:path";
+import { createHash } from "node:crypto";
 
 const BASE = "http://127.0.0.1:3101";
 const BASE_BAD = "http://127.0.0.1:3102";
 const API_DIR = "/home/nugie/stock-sdi-api";
+const COOKIE_NAME = "hl_stock_demo_session";
 
 let pass = 0;
 let fail = 0;
 const failures = [];
 
 const state = { barangId: null, txIds: [] };
+const session = { cookie: null, guestCookie: null };
 
 function ok(cond, label, extra) {
   if (cond) {
@@ -32,15 +48,20 @@ function ok(cond, label, extra) {
     console.log(`  PASS ${label}`);
   } else {
     fail++;
-    failures.push((extra === undefined ? label : `${label} :: ${JSON.stringify(extra)}`));
+    failures.push(extra === undefined ? label : `${label} :: ${JSON.stringify(extra)}`);
     console.log(`  FAIL ${label}${extra === undefined ? "" : ` :: ${JSON.stringify(extra)}`}`);
   }
 }
 
-async function req(path, { method = "GET", body } = {}) {
-  const res = await fetch(BASE + path, {
+async function raw(base, path, { method = "GET", body, cookie } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  let finalCookie = cookie;
+  if (finalCookie === undefined) finalCookie = session.cookie;
+  if (finalCookie) headers.Cookie = finalCookie;
+
+  const res = await fetch(base + path, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let data = null;
@@ -49,22 +70,40 @@ async function req(path, { method = "GET", body } = {}) {
   } catch {
     /* non-JSON fallback */
   }
-  return { status: res.status, data };
+  return { status: res.status, headers: res.headers, data };
 }
 
-async function reqBad(path, { method = "GET", body } = {}) {
-  const res = await fetch(BASE_BAD + path, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  let data = null;
-  try {
-    data = await res.json();
-  } catch {
-    /* ignore */
+// Dipakai untuk request yang TIDAK boleh mengirim cookie apa pun.
+function anon(path, opts = {}) {
+  return raw(BASE, path, { ...opts, cookie: null });
+}
+
+// Request default: membawa cookie sesi staff (bila sudah login).
+function req(path, opts = {}) {
+  return raw(BASE, path, opts);
+}
+
+function reqBad(path, opts = {}) {
+  return raw(BASE_BAD, path, opts);
+}
+
+async function loginAs(username, password, { via = anon } = {}) {
+  const r = await via("/api/auth/login", { method: "POST", body: { username, password } });
+  let setCookie = null;
+  if (r.headers && typeof r.headers.getSetCookie === "function") {
+    const arr = r.headers.getSetCookie();
+    setCookie = arr && arr.length ? arr[0] : null;
+  } else if (r.headers && typeof r.headers.get === "function") {
+    setCookie = r.headers.get("set-cookie");
   }
-  return { status: res.status, data };
+  const m = cookieValue(setCookie);
+  return { ...r, setCookie, cookieValue: m };
+}
+
+function cookieValue(setCookieHeader) {
+  if (!setCookieHeader) return null;
+  const part = setCookieHeader.split(";")[0].trim();
+  return part.startsWith(COOKIE_NAME + "=") ? part.slice(COOKIE_NAME.length + 1) : null;
 }
 
 function psql(sql) {
@@ -114,11 +153,253 @@ function cleanup() {
   }
 }
 
+function demoCredentials() {
+  const file = process.env.AUTH_CREDENTIALS_FILE || path.join(API_DIR, ".demo-users.json");
+  try {
+    const creds = JSON.parse(fs.readFileSync(file, "utf8"));
+    return {
+      staff: creds["admin.demo"] ? creds["admin.demo"].password : null,
+      guest: creds["tamu.demo"] ? creds["tamu.demo"].password : null,
+    };
+  } catch (e) {
+    return { staff: null, guest: null, error: e.message };
+  }
+}
+
+// ===========================================================================
+// AUTHENTICATION + AUTHORIZATION
+// ===========================================================================
+
+async function authSuite() {
+  console.log("== authentication & authorization ==");
+
+  const creds = demoCredentials();
+  ok(creds.staff && creds.guest, "file kredensial demo .demo-users.json terbaca (staff & guest)", creds.error);
+
+  // --- Login: body tak valid ------------------------------------------------
+  const noUser = await anon("/api/auth/login", { method: "POST", body: { password: "x" } });
+  ok(noUser.status === 400 && noUser.data.error.code === "VALIDATION_ERROR", "login tanpa username -> 400", noUser.data);
+
+  const noPass = await anon("/api/auth/login", { method: "POST", body: { username: "admin.demo" } });
+  ok(noPass.status === 400 && noPass.data.error.code === "VALIDATION_ERROR", "login tanpa password -> 400", noPass.data);
+
+  // --- Login: kredensial salah / pengguna tak dikenal -> pesan generik -----
+  const wrongPass = await anon("/api/auth/login", {
+    method: "POST",
+    body: { username: "admin.demo", password: "salah-password-123" },
+  });
+  ok(
+    wrongPass.status === 401 && wrongPass.data.error.code === "UNAUTHORIZED",
+    "password salah -> 401",
+    wrongPass.data
+  );
+  ok(
+    wrongPass.data.error.message === "Username atau password salah",
+    "pesan gagal login GENERIK (anti-enumerasi)",
+    wrongPass.data
+  );
+
+  const wrongUser = await anon("/api/auth/login", {
+    method: "POST",
+    body: { username: "pengguna-tidak-ada", password: "apa-saja" },
+  });
+  ok(
+    wrongUser.status === 401 &&
+      wrongUser.data.error.code === "UNAUTHORIZED" &&
+      wrongUser.data.error.message === "Username atau password salah",
+    "username tak dikenal -> 401 + pesan sama",
+    wrongUser.data
+  );
+
+  // --- Login staff valid ----------------------------------------------------
+  const login = await loginAs("admin.demo", creds.staff);
+  ok(login.status === 200, "login staff valid -> 200", login.data);
+
+  ok(
+    login.data &&
+      login.data.data &&
+      login.data.data.user &&
+      login.data.data.user.id > 0 &&
+      login.data.data.user.username === "admin.demo" &&
+      login.data.data.user.name === "Admin Demo" &&
+      login.data.data.user.role === "staff",
+    "shape user login {id, username, name, role}",
+    login.data && login.data.data
+  );
+  ok(Boolean(login.data.data.expires_at), "respons login berisi expires_at", login.data);
+
+  const rawLoginBody = JSON.stringify(login.data);
+  ok(
+    !/password|password_hash|"hash"|token/.test(rawLoginBody),
+    "respons login TIDAK membocorkan password/hash/token",
+    rawLoginBody
+  );
+
+  // --- Cookie attributes ----------------------------------------------------
+  ok(Boolean(login.setCookie), "login mengirim Set-Cookie", login.setCookie);
+  ok(
+    String(login.setCookie || "").includes("HttpOnly"),
+    "cookie HttpOnly",
+    login.setCookie
+  );
+  ok(
+    String(login.setCookie || "").includes("SameSite=Lax"),
+    "cookie SameSite=Lax",
+    login.setCookie
+  );
+  ok(
+    String(login.setCookie || "").includes("Path=/"),
+    "cookie Path=/",
+    login.setCookie
+  );
+  const secureFlag = /;\s*Secure/i.test(String(login.setCookie || ""));
+  ok(!secureFlag, "cookie Secure TIDAK diset pada dev loopback (COOKIE_SECURE=false)", login.setCookie);
+
+  const tok = login.cookieValue;
+  ok(
+    tok && /^[A-Za-z0-9_-]{32,}$/.test(tok),
+    "token cookie base64url (raw, random)",
+    tok
+  );
+  const cookieHash = createHash("sha256").update(tok || "").digest("hex");
+  const storedHash = psql(
+    `SELECT count(*) FROM public.sessions WHERE token_hash = '${cookieHash}'`
+  );
+  ok(num(storedHash) === 1, "hanya HASH sha256 token yang tersimpan di DB (bukan token mentah)", storedHash);
+  const storedRaw = psql(`SELECT count(*) FROM public.sessions WHERE token_hash = '${tok}'`);
+  ok(num(storedRaw) === 0, "token mentah TIDAK ada di kolom token_hash", storedRaw);
+  session.cookie = `hl_stock_demo_session=${tok}`;
+
+  // --- /api/auth/me ----------------------------------------------------------
+  const me = await req("/api/auth/me");
+  ok(
+    me.status === 200 && me.data.data.authenticated === true && me.data.data.user.role === "staff",
+    "GET /api/auth/me (dengan sesi) -> 200",
+    me.data
+  );
+  const meBody = JSON.stringify(me.data);
+  ok(!/password|"hash"|token/.test(meBody), "respons /me tidak membocorkan password/hash/token", meBody);
+
+  const me2 = await req("/api/auth/me");
+  ok(me2.status === 200 && me2.data.data.user.id === me.data.data.user.id, "sesi bertahan antar request (refresh)", me2.data);
+
+  const meAnon = await anon("/api/auth/me");
+  ok(meAnon.status === 401 && meAnon.data.error.code === "UNAUTHORIZED", "GET /api/auth/me tanpa sesi -> 401", meAnon.data);
+
+  // --- Read endpoints tanpa sesi -> 401 -------------------------------------
+  const anonBarang = await anon("/api/barang");
+  ok(anonBarang.status === 401 && anonBarang.data.error.code === "UNAUTHORIZED", "GET /api/barang tanpa sesi -> 401", anonBarang.data);
+  const anonStock = await anon("/api/stock");
+  ok(anonStock.status === 401, "GET /api/stock tanpa sesi -> 401", anonStock.data);
+  const anonTx = await anon("/api/transaksi");
+  ok(anonTx.status === 401, "GET /api/transaksi tanpa sesi -> 401", anonTx.data);
+
+  // --- Token sesi tak dikenal -> 401 ----------------------------------------
+  const badCookie = `hl_stock_demo_session=${"A".repeat(43)}`;
+  const bad = await req("/api/auth/me", { cookie: badCookie });
+  ok(bad.status === 401 && bad.data.error.code === "UNAUTHORIZED", "cookie token tak dikenal -> 401 (/me)", bad.data);
+  const badB = await req("/api/barang", { cookie: badCookie });
+  ok(badB.status === 401, "cookie token tak dikenal -> 401 (/api/barang)", badB.data);
+
+  // --- Sesi expired -> 401 + baris dihapus ----------------------------------
+  const adminId = psql("SELECT id FROM public.user_accounts WHERE username = 'admin.demo'");
+  const expiredTok = "x".repeat(43);
+  const expiredHash = createHash("sha256").update(expiredTok).digest("hex");
+  psql(
+    `INSERT INTO public.sessions (user_id, token_hash, expires_at, created_at, ip_address, user_agent)
+     VALUES (${adminId}, '${expiredHash}', now() - interval '1 hour', now() - interval '2 hours', NULL, 'smoke')`
+  );
+  const expired = await req("/api/auth/me", { cookie: `hl_stock_demo_session=${expiredTok}` });
+  ok(expired.status === 401 && expired.data.error.code === "UNAUTHORIZED", "sesi expired -> 401", expired.data);
+  const expiredLeft = num(psql(`SELECT count(*) FROM public.sessions WHERE token_hash = '${expiredHash}'`));
+  ok(expiredLeft === 0, "sesi expired otomatis dihapus saat divalidasi", expiredLeft);
+
+  // --- Cleanup expired saat login (opportunistic) ----------------------------
+  const guestId = psql("SELECT id FROM public.user_accounts WHERE username = 'tamu.demo'");
+  psql(
+    `INSERT INTO public.sessions (user_id, token_hash, expires_at)
+     VALUES (${guestId}, '${createHash("sha256").update("yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy").digest("hex")}', now() - interval '30 minutes')`
+  );
+  const relog = await loginAs("admin.demo", creds.staff);
+  ok(relog.status === 200, "login ulang tetap 200", relog.data);
+  const stale = num(psql("SELECT count(*) FROM public.sessions WHERE expires_at <= now()"));
+  ok(stale === 0, "login membersihkan sesi expired yang tersisa (opportunistic)", stale);
+  session.cookie = `hl_stock_demo_session=${relog.cookieValue}`;
+
+  // --- Guest: read OK, write 403 ---------------------------------------------
+  const glogin = await loginAs("tamu.demo", creds.guest);
+  ok(glogin.status === 200 && glogin.data.data.user.role === "guest", "login guest valid -> 200 (role guest)", glogin.data);
+  session.guestCookie = `hl_stock_demo_session=${glogin.cookieValue}`;
+
+  const gBarang = await req("/api/barang", { cookie: session.guestCookie });
+  ok(gBarang.status === 200, "guest GET /api/barang -> 200", gBarang.data);
+  const gStock = await req("/api/stock", { cookie: session.guestCookie });
+  ok(gStock.status === 200, "guest GET /api/stock -> 200", gStock.data);
+  const gTx = await req("/api/transaksi", { cookie: session.guestCookie });
+  ok(gTx.status === 200, "guest GET /api/transaksi -> 200", gTx.data);
+
+  const gWriteBarang = await req("/api/barang", {
+    method: "POST",
+    cookie: session.guestCookie,
+    body: { nama: `Nama ${Date.now()}` },
+  });
+  ok(gWriteBarang.status === 403 && gWriteBarang.data.error.code === "FORBIDDEN", "guest POST /api/barang -> 403", gWriteBarang.data);
+  const gWriteTx = await req("/api/transaksi", {
+    method: "POST",
+    cookie: session.guestCookie,
+    body: { barang_id: 1, jenis: "masuk", jumlah: 1, warehouse: "Puri", kriteria: "Good" },
+  });
+  ok(gWriteTx.status === 403 && gWriteTx.data.error.code === "FORBIDDEN", "guest POST /api/transaksi -> 403", gWriteTx.data);
+
+  // --- Staff: write OK (POST /api/barang) + cleanup langsung -----------------
+  const staffName = `AuthTest ${Date.now()}`;
+  const sCreate = await req("/api/barang", { method: "POST", body: { nama: staffName, stok: 0 } });
+  ok(sCreate.status === 201 && sCreate.data.data.nama === staffName, "staff POST /api/barang -> 201", sCreate.data);
+  psql(`DELETE FROM public.barang WHERE nama = '${staffName}'`);
+  const left = num(psql(`SELECT count(*) FROM public.barang WHERE nama = '${staffName}'`));
+  ok(left === 0, "barang uji auth dibersihkan (baseline terjaga)", left);
+
+  // --- Logout ----------------------------------------------------------------
+  const logoutCookie = session.cookie;
+  const logoutTok = logoutCookie.split("=")[1];
+  const logoutHash = createHash("sha256").update(logoutTok || "").digest("hex");
+  const lg = await req("/api/auth/logout", { method: "POST", cookie: logoutCookie });
+  ok(lg.status === 200 && lg.data.data.ok === true, "POST /api/auth/logout -> {ok:true}", lg.data);
+
+  const meAfterLogout = await req("/api/auth/me", { cookie: logoutCookie });
+  ok(meAfterLogout.status === 401, "sesi bekas logout -> 401", meAfterLogout.data);
+
+  const loggedOutCount = num(psql(`SELECT count(*) FROM public.sessions WHERE token_hash = '${logoutHash}'`));
+  ok(loggedOutCount === 0, "sesi benar-benar dihapus dari database (bukan hanya cookie)", loggedOutCount);
+
+  // --- Re-login staff untuk tes berikutnya ----------------------------------
+  const relog2 = await loginAs("admin.demo", creds.staff);
+  ok(relog2.status === 200, "re-login staff -> 200", relog2.data);
+  session.cookie = `hl_stock_demo_session=${relog2.cookieValue}`;
+
+  // --- Rate limit login (terakhir: pakai username fiktif agar akun demo aman)
+  const fakeUser = `bruteforce-${Date.now()}`;
+  let rlStatuses = [];
+  for (let i = 0; i < 5; i++) {
+    const r = await anon("/api/auth/login", { method: "POST", body: { username: fakeUser, password: "salah" } });
+    rlStatuses.push(r.status);
+  }
+  ok(rlStatuses.every((s) => s === 401), "5 percobaan gagal -> 401 (sebelum limit)", rlStatuses);
+  const rl = await anon("/api/auth/login", { method: "POST", body: { username: fakeUser, password: "salah" } });
+  ok(rl.status === 429 && rl.data.error.code === "RATE_LIMITED", "percobaan ke-6 -> 429 RATE_LIMITED", rl.data);
+
+  console.log("  (auth login rate-limit window aktif untuk username fiktif tadi, akun demo tidak terpengaruh)");
+}
+
+// ===========================================================================
+// EST READBASELINE + TRANSAKSI + ERROR PATHS + THROWAWAY + DBDOWN
+// ===========================================================================
+
 async function readBaseline() {
   console.log("== health & read baseline ==");
 
   const h = await req("/api/health");
-  ok(h.status === 200 && h.data && h.data.ok === true, "health ok", h.data);
+  ok(h.status === 200 && h.data && h.data.ok === true, "health ok (publik)", h.data);
 
   const barang = await req("/api/barang");
   ok(barang.status === 200, "GET /api/barang 200", barang.status);
@@ -261,8 +542,8 @@ async function errorPaths() {
   });
   ok(bjRes.status === 400, "body JSON tidak valid -> 400", bjRes.status);
 
-  const unknown = await req("/api/tidakada");
-  ok(unknown.status === 404 && unknown.data.error && unknown.data.error.code === "NOT_FOUND", "endpoint tak dikenal -> 404 format error", unknown.data);
+  const unknown = await anon("/api/tidakada");
+  ok(unknown.status === 404 && unknown.data.error && unknown.data.error.code === "NOT_FOUND", "endpoint tak dikenal -> 404 format error (publik)", unknown.data);
 
   const insuff = await req("/api/transaksi", { method: "POST", body: { barang_id: 8, jenis: "keluar", jumlah: 100, warehouse: "Puri", kriteria: "Good" } });
   ok(insuff.status === 409 && insuff.data.error.code === "INSUFFICIENT_STOCK", "keluar melebihi stok -> 409 INSUFFICIENT_STOCK", insuff.data);
@@ -294,6 +575,7 @@ async function throwaway() {
 
   const t1 = await req("/api/transaksi", { method: "POST", body: { barang_id: idp, jenis: "masuk", jumlah: 5, warehouse: "Puri", kriteria: "Good", keterangan: "smoke", client_tx_id: u1 } });
   ok(t1.status === 201 && t1.data.data.jenis === "masuk", "POST transaksi masuk -> 201", t1.data);
+  ok(t1.data.data.user_id !== null, "transaksi tersimpan dengan user_id (dari sesi aktif)", t1.data.data.user_id);
   state.txIds.push(t1.data.data.id);
 
   const gAfter1 = await req(`/api/barang/${idp}`);
@@ -351,10 +633,24 @@ async function dbDown() {
   ok(up, "instance 3102 bangkit", up);
 
   const h = await reqBad("/api/health");
-  ok(h.status === 503, "health instance rusak -> 503", h.data);
+  ok(h.status === 503, "health instance rusak -> 503 (publik)", h.data);
 
-  const b = await reqBad("/api/barang");
-  ok(b.status === 500 && b.data.error.code === "DATABASE_ERROR", "endpoint -> 500 DATABASE_ERROR (tanpa bocor SQL)", b.data);
+  // Dengan cookie valid sekalipun: DB down => kegagalan validasi sesi disamarkan
+  // menjadi 500 DATABASE_ERROR tanpa membocorkan SQL/kredensial.
+  const b = await reqBad("/api/barang", { cookie: session.cookie });
+  ok(b.status === 500 && b.data.error.code === "DATABASE_ERROR", "endpoint dengan sesi + DB down -> 500 DATABASE_ERROR", b.data);
+  const bBody = JSON.stringify(b.data);
+  ok(
+    !/password|token_hash|stack|syntax error|PG::/i.test(bBody),
+    "error DB tidak membocorkan SQL/kredensial/stack",
+    bBody
+  );
+
+  const meDown = await reqBad("/api/auth/me", { cookie: session.cookie });
+  ok(meDown.status === 500 && meDown.data.error.code === "DATABASE_ERROR", "/api/auth/me dengan sesi + DB down -> 500 DATABASE_ERROR", meDown.data);
+
+  const meDownAnon = await reqBad("/api/auth/me", { cookie: null });
+  ok(meDownAnon.status === 401, "/api/auth/me tanpa sesi + DB down -> 401 (tanpa query DB)", meDownAnon.data);
 
   child.kill("SIGTERM");
   await new Promise((r) => setTimeout(r, 1000));
@@ -371,6 +667,9 @@ async function baselineAfter() {
   const slCount = num(psql("SELECT count(*) FROM public.stock_levels"));
   ok(slCount === 13, "stock_levels kembali 13", slCount);
 
+  const profiles = num(psql("SELECT count(*) FROM public.profiles"));
+  ok(profiles === 2, "profiles tetap 2", profiles);
+
   const stk = await req("/api/stock");
   let consistent = true;
   let reason = "";
@@ -386,6 +685,7 @@ async function baselineAfter() {
 
 async function main() {
   try {
+    await authSuite();
     await readBaseline();
     await readTransaksi();
     await errorPaths();

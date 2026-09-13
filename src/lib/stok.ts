@@ -1,4 +1,4 @@
-import { supabase } from '@/lib/auth';
+import { supabase } from '@/lib/supabase';
 import type { Barang, StockLevel, StockRow } from '@/types';
 import { GUDANG, KRITERIA } from '@/lib/konstanta';
 

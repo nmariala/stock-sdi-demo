@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useCallback, useEffect } from 'react';
-import { supabase } from '@/lib/auth';
+import { supabase } from '@/lib/supabase';
 import { GUDANG, KRITERIA } from '@/lib/konstanta';
 import type { Barang } from '@/types';
 

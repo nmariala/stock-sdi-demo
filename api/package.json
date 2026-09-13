@@ -7,9 +7,10 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check db.js && node --check utils/errors.js && node --check utils/validation.js && node --check middleware/errorHandler.js && node --check routes/barang.js && node --check routes/stock.js && node --check routes/transaksi.js && node --check routes/health.js"
+    "check": "node --check server.js && node --check db.js && node --check utils/errors.js && node --check utils/validation.js && node --check utils/cookies.js && node --check lib/passwords.js && node --check lib/sessions.js && node --check middleware/errorHandler.js && node --check middleware/auth.js && node --check middleware/rateLimit.js && node --check routes/barang.js && node --check routes/stock.js && node --check routes/transaksi.js && node --check routes/health.js && node --check routes/auth.js && node --check scripts/useradmin.js"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",

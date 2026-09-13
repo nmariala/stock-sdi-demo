@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { supabase } from '@/lib/auth';
+import { supabase } from '@/lib/supabase';
 import { formatQuantity } from '@/lib/format';
 import type { Barang } from '@/types';
 

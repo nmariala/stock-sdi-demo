@@ -24,9 +24,24 @@ function duplicateError(msg) {
   return new AppError(409, "DUPLICATE_NAME", msg);
 }
 
+function unauthorizedError(msg) {
+  return new AppError(401, "UNAUTHORIZED", msg);
+}
+
+function forbiddenError(msg) {
+  return new AppError(403, "FORBIDDEN", msg);
+}
+
+function rateLimitError(msg) {
+  return new AppError(429, "RATE_LIMITED", msg);
+}
+
 module.exports = {
   AppError,
   validationError,
   notFoundError,
   duplicateError,
+  unauthorizedError,
+  forbiddenError,
+  rateLimitError,
 };

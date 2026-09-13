@@ -8,6 +8,7 @@ const cors = require("cors");
 const { pool } = require("./db");
 const errorHandler = require("./middleware/errorHandler");
 const health = require("./routes/health");
+const auth = require("./routes/auth");
 const barang = require("./routes/barang");
 const stock = require("./routes/stock");
 const transaksi = require("./routes/transaksi");
@@ -16,15 +17,24 @@ const app = express();
 app.disable("x-powered-by");
 
 app.use(express.json({ limit: "100kb" }));
+
+// CORS: origin eksplisit (bukan wildcard) + izinkan kredensial (cookie).
+// API hanya di-loopback; origin dev = http://localhost:3000.
+const allowedOrigins = (process.env.API_CORS_ORIGIN || "http://localhost:3000")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 app.use(
   cors({
-    origin: process.env.API_CORS_ORIGIN || "http://localhost:3000",
+    origin: allowedOrigins.length ? allowedOrigins : ["http://localhost:3000"],
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type"],
+    credentials: true,
   })
 );
 
 app.use("/api/health", health);
+app.use("/api/auth", auth);
 app.use("/api/barang", barang);
 app.use("/api/stock", stock);
 app.use("/api/transaksi", transaksi);

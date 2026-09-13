@@ -1,4 +1,8 @@
-export const GUEST_USERNAME = process.env.NEXT_PUBLIC_GUEST_USERNAME || 'tamu';
+export const GUEST_USERNAME = process.env.NEXT_PUBLIC_GUEST_USERNAME || 'tamu.demo';
+
+// Kompatibilitas legacy: strip suffix email Supabase (@durian.sdi) jika ada.
+export const stripLegacySuffix = (username: string): string =>
+  username.replace(/@durian\.sdi$/i, '');
 
 const EXTRA_GUEST_ROLES = (process.env.NEXT_PUBLIC_GUEST_ROLES ?? '')
   .split(',')

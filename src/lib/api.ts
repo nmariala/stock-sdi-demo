@@ -11,16 +11,20 @@ import type { Barang, StockRow, Transaksi } from '@/types';
 //   - Belum ada halaman yang memakai fungsi di file ini sampai cut-over resmi.
 // ---------------------------------------------------------------------------
 
-const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:3001').replace(/\/+$/, '');
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:3101').replace(/\/+$/, '');
+export const API_BASE_URL = API_BASE;
 
 export const API_ERROR_CODES = [
   'VALIDATION_ERROR',
+  'UNAUTHORIZED',
+  'FORBIDDEN',
   'NOT_FOUND',
   'DUPLICATE_NAME',
   'DUPLICATE_TRANSACTION',
   'INSUFFICIENT_STOCK',
   'FOREIGN_KEY_ERROR',
   'CONSTRAINT_ERROR',
+  'RATE_LIMITED',
   'DATABASE_ERROR',
   'INTERNAL_ERROR',
 ] as const;
@@ -69,6 +73,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   try {
     res = await fetch(`${API_BASE}${path}`, {
       headers: { 'Content-Type': 'application/json' },
+      // Sesi memakai cookie HttpOnly; browser wajib mengirimnya.
+      credentials: 'include',
       ...init,
     });
   } catch {

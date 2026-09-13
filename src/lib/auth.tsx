@@ -1,132 +1,151 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { createClient, type Session } from '@supabase/supabase-js';
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { API_BASE_URL } from '@/lib/api';
 import type { Profile } from '@/types';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// ---------------------------------------------------------------------------
+// Custom authentication (Stock SDI Demo API).
+// Sesion dikelola SERVER via cookie HttpOnly (`hl_stock_demo_session`).
+// Frontend tidak pernah menyimpan token di localStorage/sessionStorage/state —
+// cookie ditangani otomatis oleh browser (fetch dengan credentials: "include").
+// ---------------------------------------------------------------------------
 
-const PROFILE_FETCH_TIMEOUT_MS = 10000;
-const LOGIN_TIMEOUT_MS = 15000;
-
-const LOGIN_TIMEOUT_ERROR: { name: string; message: string; code: string; status: number } = {
-  name: 'LoginTimeoutError',
-  message: 'Waktu login habis. Periksa koneksi internet lalu coba lagi.',
-  code: 'auth_timeout',
-  status: 0,
-};
+export interface AuthUser {
+  id: number;
+  username: string;
+  name: string;
+  role: string;
+}
 
 interface AuthContextType {
-  session: Session | null;
+  user: AuthUser | null;
   profile: Profile | null;
   loading: boolean;
-  signIn: (email: string, password: string) => Promise<{ error?: string }>;
+  signIn: (username: string, password: string) => Promise<{ error?: string }>;
   signOut: () => Promise<void>;
 }
 
+const LOGIN_TIMEOUT_MS = 15000;
+
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+async function authFetch<T>(path: string, init: RequestInit = {}): Promise<{ ok: boolean; status: number; data: T | null }> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      ...init,
+    });
+  } catch {
+    return { ok: false, status: 0, data: null };
+  }
+  let data: T | null = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+  return { ok: res.ok, status: res.status, data };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const fetchProfile = async (userId: string): Promise<Profile | null> => {
-    try {
-      const result = await Promise.race([
-        supabase.from('profiles').select('*').eq('id', userId).single(),
-        new Promise<{ data: null; error: { message: string } }>((resolve) => {
-          setTimeout(() => resolve({ data: null, error: { message: 'Profil query timed out' } }), PROFILE_FETCH_TIMEOUT_MS);
-        }),
-      ]);
-      const { data, error } = result;
-      if (error || !data) return null;
-      return data as Profile;
-    } catch (e) {
-      console.error('PROFILE FETCH ERROR:', e);
-      return null;
-    }
-  };
+  const profile = useMemo<Profile | null>(
+    () => (user ? { id: String(user.id), nama: user.name, role: user.role } : null),
+    [user]
+  );
 
   useEffect(() => {
+    let cancelled = false;
     const init = async () => {
       try {
-        const { data: { session: initialSession } } = await supabase.auth.getSession();
-        if (initialSession) {
-          setSession(initialSession);
-          fetchProfile(initialSession.user.id).then(setProfile);
+        const { ok, status, data } = await authFetch('/api/auth/me');
+        if (cancelled) return;
+        if (ok && status === 200) {
+          const u = (data as { data?: { user?: AuthUser } } | null)?.data?.user;
+          if (u) setUser(u);
         }
-      } catch (e) {
-        console.error('INIT SESSION ERROR:', e);
+      } catch {
+        // API tidak terjangkau: lanjut sebagai "belum masuk" (coba lagi by user).
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
     init();
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession);
-      if (newSession) {
-        fetchProfile(newSession.user.id).then(setProfile);
-      } else {
-        setProfile(null);
-      }
-    });
-
-    return () => subscription.unsubscribe();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const signIn = async (email: string, password: string) => {
-    const { data, error: authError } = await Promise.race([
-      supabase.auth.signInWithPassword({ email, password }),
-      new Promise<{ data: { user: null; session: null }; error: typeof LOGIN_TIMEOUT_ERROR }>((resolve) => {
-        setTimeout(
-          () => resolve({ data: { user: null, session: null }, error: LOGIN_TIMEOUT_ERROR }),
-          LOGIN_TIMEOUT_MS
-        );
-      }),
-    ]);
-    if (authError) {
-      console.error('LOGIN ERROR (website):', {
-        name: authError.name,
-        status: authError.status,
-        code: authError.code,
-        message: authError.message,
-        email,
-      });
-      const msg = (authError.message || '').toLowerCase();
-      if (authError.code === 'auth_timeout' || authError.name === 'LoginTimeoutError') {
-        return { error: 'Waktu login habis. Periksa koneksi internet lalu coba lagi.' };
+  const signIn = async (username: string, password: string) => {
+    try {
+      const res = await Promise.race([
+        fetch(`${API_BASE_URL}/api/auth/login`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        }),
+        new Promise<Response>((_resolve, reject) => {
+          setTimeout(() => {
+            const e = new Error('Waktu login habis');
+            e.name = 'AuthTimeoutError';
+            reject(e);
+          }, LOGIN_TIMEOUT_MS);
+        }),
+      ]);
+
+      let data: { error?: { message?: string }; data?: { user: AuthUser } } | null = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
       }
-      if (authError.code === 'email_not_confirmed' || msg.includes('email not confirmed')) {
-        return { error: 'Email belum dikonfirmasi. Periksa email Anda.' };
+
+      if (res.status === 401) {
+        return { error: data?.error?.message || 'Username atau password salah' };
       }
-      if (authError.status === 429 || msg.includes('rate limit') || msg.includes('too many')) {
+      if (res.status === 429) {
         return { error: 'Terlalu banyak percobaan login. Coba lagi beberapa menit.' };
       }
-      if (authError.code === 'invalid_credentials' || msg.includes('invalid login credentials')) {
-        return { error: 'Username atau password salah' };
+      if (res.status === 400) {
+        return { error: data?.error?.message || 'Login gagal. Periksa input Anda.' };
       }
-      return { error: `Login gagal: ${authError.message}` };
+      if (!res.ok) {
+        return { error: 'Login gagal. Silakan coba lagi.' };
+      }
+
+      const u = data?.data?.user;
+      if (!u) return { error: 'Gagal mendapatkan sesi' };
+      setUser(u);
+      return {};
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AuthTimeoutError') {
+        return { error: 'Waktu login habis. Periksa koneksi internet lalu coba lagi.' };
+      }
+      return { error: 'Tidak dapat terhubung ke server aplikasi. Coba lagi.' };
     }
-    if (!data.session) return { error: 'Gagal mendapatkan sesi' };
-    setSession(data.session);
-    return {};
   };
 
   const signOut = async () => {
-    await supabase.auth.signOut();
-    setSession(null);
-    setProfile(null);
+    try {
+      await fetch(`${API_BASE_URL}/api/auth/logout`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch {
+      // logout tetap dijalankan di sisi client walau request gagal
+    }
+    setUser(null);
   };
 
-  return (
-    <AuthContext.Provider value={{ session, profile, loading, signIn, signOut }}>
-      {children}
-    </AuthContext.Provider>
-  );
+  const value: AuthContextType = { user, profile, loading, signIn, signOut };
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth() {
