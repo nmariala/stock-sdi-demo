@@ -1,11 +1,11 @@
 'use client';
 
 import { useState, useCallback, useEffect } from 'react';
-import { supabase } from '@/lib/supabase';
+import { ApiError, createTransaksi, getBarangList, getApiErrorMessage } from '@/lib/api';
 import { GUDANG, KRITERIA } from '@/lib/konstanta';
 import type { Barang } from '@/types';
 
-function createClientTxId(): string {
+function newClientTxId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID();
   }
@@ -28,9 +28,8 @@ export default function TransaksiForm({ jenis }: { jenis: 'masuk' | 'keluar' }) 
 
   const loadBarang = useCallback(async () => {
     try {
-      const { data, error } = await supabase.from('barang').select('*').order('nama');
-      if (error) throw error;
-      setBarangList(Array.isArray(data) ? data : []);
+      const res = await getBarangList({ sort: 'nama', order: 'asc', pageSize: 500 });
+      setBarangList(Array.isArray(res.data) ? res.data : []);
     } catch {
       setBarangList([]);
     }
@@ -61,33 +60,34 @@ export default function TransaksiForm({ jenis }: { jenis: 'masuk' | 'keluar' }) 
     setSubmitting(true);
     setMessage(null);
     try {
-      const { error } = await supabase.from('transaksi').insert({
+      await createTransaksi({
         barang_id: selectedBarang.id,
         jenis,
         jumlah: qty,
         warehouse: gudang,
         kriteria,
         keterangan: keterangan.trim() ? keterangan.trim() : null,
-        client_tx_id: createClientTxId(),
+        client_tx_id: newClientTxId(),
       });
-      if (error) {
-        if (error.code === '23505') {
-          setMessage({ type: 'success', text: 'Transaksi ini sudah tercatat sebelumnya' });
-          resetForm();
-        } else if (error.code === 'check_violation') {
-          setMessage({ type: 'error', text: 'Stok tidak mencukupi untuk barang keluar' });
-        } else {
-          setMessage({ type: 'error', text: error.message });
-        }
-        return;
-      }
       setMessage({
         type: 'success',
         text: `${jenis === 'masuk' ? 'Barang masuk' : 'Barang keluar'} berhasil dicatat`,
       });
       resetForm();
-    } catch {
-      setMessage({ type: 'error', text: 'Terjadi kesalahan saat menyimpan transaksi' });
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'DUPLICATE_TRANSACTION') {
+        // client_tx_id sudah tercatat (idempoten dari API) -> anggap sukses.
+        setMessage({ type: 'success', text: 'Transaksi ini sudah tercatat sebelumnya' });
+        resetForm();
+      } else if (err instanceof ApiError && err.code === 'INSUFFICIENT_STOCK') {
+        setMessage({ type: 'error', text: 'Stok tidak mencukupi untuk barang keluar' });
+      } else {
+        // UNAUTHORIZED/FORBIDDEN/VALIDATION/RATE_LIMITED/network/5xx dsb.
+        setMessage({
+          type: 'error',
+          text: getApiErrorMessage(err, 'Terjadi kesalahan saat menyimpan transaksi'),
+        });
+      }
     } finally {
       setSubmitting(false);
     }

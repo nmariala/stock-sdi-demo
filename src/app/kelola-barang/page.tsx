@@ -1,12 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { supabase } from '@/lib/supabase';
+import { ApiError, getBarangList, createBarang, updateBarang, deleteBarang, getApiErrorMessage } from '@/lib/api';
 import { formatQuantity } from '@/lib/format';
 import type { Barang } from '@/types';
 
 const normalizeNama = (s: string): string => String(s || '').toLowerCase().trim().replace(/\s+/g, ' ');
-const escapeLike = (s: string): string => s.replace(/[\\%_]/g, (m) => '\\' + m);
 
 interface FormMessage {
   title: string;
@@ -36,8 +35,8 @@ export default function KelolaBarangPage() {
 
   const fetchBarang = useCallback(async () => {
     try {
-      const { data, error } = await supabase.from('barang').select('*').order('nama');
-      if (!error && Array.isArray(data)) setBarangList(data);
+      const res = await getBarangList({ sort: 'nama', order: 'asc', pageSize: 500 });
+      if (Array.isArray(res.data)) setBarangList(res.data);
     } finally {
       setLoading(false);
     }
@@ -49,16 +48,6 @@ export default function KelolaBarangPage() {
 
   const checkDuplicateLocal = (nama: string, excludeId?: number): boolean =>
     barangList.some((b) => b && b.nama != null && b.id !== excludeId && normalizeNama(b.nama) === nama);
-
-  const checkDuplicateDb = async (nama: string, excludeId?: number): Promise<boolean> => {
-    const { data, error } = await supabase
-      .from('barang')
-      .select('id')
-      .ilike('nama', escapeLike(nama))
-      .neq('id', excludeId);
-    if (error) console.log(error);
-    return Array.isArray(data) && data.length > 0;
-  };
 
   const submitAdd = async () => {
     if (busyRef.current) return;
@@ -75,26 +64,17 @@ export default function KelolaBarangPage() {
     busyRef.current = true;
     setAddSubmitting(true);
     try {
-      if (await checkDuplicateDb(norm)) {
+      await createBarang({ nama, stok: Number(newQty) || 0 });
+      setNewNama('');
+      setNewQty('');
+      setShowAdd(false);
+      setMessage(null);
+      fetchBarang();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'DUPLICATE_NAME') {
         setMessage({ title: 'Barang sudah terdaftar', body: `"${nama}" sudah ada di daftar barang. Tidak boleh ada barang duplikat.` });
-        return;
-      }
-      const { error } = await supabase.from('barang').insert({
-        nama,
-        stok: Number(newQty) || 0,
-      });
-      if (error) {
-        if (error.code === '23505') {
-          setMessage({ title: 'Barang sudah terdaftar', body: `"${nama}" sudah ada di daftar barang. Tidak boleh ada barang duplikat.` });
-        } else {
-          setMessage({ title: 'Gagal', body: error.message });
-        }
       } else {
-        setNewNama('');
-        setNewQty('');
-        setShowAdd(false);
-        setMessage(null);
-        fetchBarang();
+        setMessage({ title: 'Gagal', body: getApiErrorMessage(err, 'Gagal menyimpan barang baru.') });
       }
     } finally {
       busyRef.current = false;
@@ -122,21 +102,15 @@ export default function KelolaBarangPage() {
     }
     busyRef.current = true;
     try {
-      if (await checkDuplicateDb(norm, id)) {
+      await updateBarang(id, { nama });
+      setEditingId(null);
+      setMessage(null);
+      fetchBarang();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'DUPLICATE_NAME') {
         setMessage({ title: 'Nama sudah dipakai', body: `"${nama}" sudah digunakan oleh barang lain.` });
-        return;
-      }
-      const { error } = await supabase.from('barang').update({ nama }).eq('id', id);
-      if (error) {
-        if (error.code === '23505') {
-          setMessage({ title: 'Nama sudah dipakai', body: `"${nama}" sudah digunakan oleh barang lain.` });
-        } else {
-          setMessage({ title: 'Gagal update', body: error.message });
-        }
       } else {
-        setEditingId(null);
-        setMessage(null);
-        fetchBarang();
+        setMessage({ title: 'Gagal update', body: getApiErrorMessage(err, 'Gagal memperbarui barang.') });
       }
     } finally {
       busyRef.current = false;
@@ -147,15 +121,20 @@ export default function KelolaBarangPage() {
     if (deletingRef.current) return;
     deletingRef.current = true;
     try {
-      const { error } = await supabase.from('barang').delete().eq('id', item.id);
-      if (error) {
+      await deleteBarang(item.id);
+      setMessage(null);
+      fetchBarang();
+    } catch (err) {
+      if (err instanceof ApiError && (err.code === 'FOREIGN_KEY_ERROR' || err.code === 'CONSTRAINT_ERROR')) {
         setMessage({
           title: 'Tidak bisa dihapus',
           body: 'Barang ini sudah punya riwayat transaksi masuk/keluar, jadi tidak bisa dihapus. (Hubungi Admin)',
         });
       } else {
-        setMessage(null);
-        fetchBarang();
+        setMessage({
+          title: 'Tidak bisa dihapus',
+          body: getApiErrorMessage(err, 'Gagal menghapus barang.'),
+        });
       }
     } finally {
       deletingRef.current = false;

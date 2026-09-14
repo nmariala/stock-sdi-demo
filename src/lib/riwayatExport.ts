@@ -1,7 +1,7 @@
-export const TRANS_SELECT =
-  'id, barang_id, user_id, jenis, jumlah, created_at, warehouse, kriteria, keterangan';
+import type { TransaksiQuery } from '@/lib/api';
 
-export const EXPORT_BATCH = 1000;
+// Batas halaman maksimum yang diizinkan API (api/utils/validation.js = 500).
+export const EXPORT_BATCH = 500;
 export const EXPORT_MAX_ROWS = 20000;
 export const EXPORT_TOO_MANY_MESSAGE =
   'Data terlalu banyak untuk diekspor sekaligus. Silakan gunakan filter tanggal.';
@@ -9,28 +9,23 @@ export const EXPORT_TOO_MANY_MESSAGE =
 export interface RiwayatFilters {
   gudang: string;
   kriteria: string;
-  jenis: string;
+  jenis: 'all' | 'masuk' | 'keluar';
   barangId: number | string;
   fromDate: Date | null;
   toDate: Date | null;
 }
 
-type Filterable = {
-  eq: (column: string, value: unknown) => unknown;
-  gte: (column: string, value: unknown) => unknown;
-  lt: (column: string, value: unknown) => unknown;
-};
-
-export function applyRiwayatFilters<B>(q: B, f: RiwayatFilters): B {
-  const base = q as Filterable;
-  let out = q;
-  if (f.gudang !== 'all') out = base.eq('warehouse', f.gudang) as B;
-  if (f.kriteria !== 'all') out = base.eq('kriteria', f.kriteria) as B;
-  if (f.jenis !== 'all') out = base.eq('jenis', f.jenis) as B;
-  if (f.barangId !== 'all' && f.barangId != null) out = base.eq('barang_id', Number(f.barangId)) as B;
-  if (f.fromDate) out = base.gte('created_at', dayStartISO(f.fromDate)) as B;
-  if (f.toDate) out = base.lt('created_at', nextDayStartISO(f.toDate)) as B;
-  return out;
+// Ubah filter UI riwayat menjadi query params REST API
+// (GET /api/transaksi?warehouse=&kriteria=&jenis=&barang_id=&from=&to=).
+export function toTransaksiParams(f: RiwayatFilters): TransaksiQuery {
+  return {
+    warehouse: f.gudang !== 'all' ? f.gudang : undefined,
+    kriteria: f.kriteria !== 'all' ? f.kriteria : undefined,
+    jenis: f.jenis !== 'all' ? f.jenis : undefined,
+    barang_id: f.barangId !== 'all' && f.barangId != null ? Number(f.barangId) : undefined,
+    from: f.fromDate ? toDateStr(f.fromDate) : undefined,
+    to: f.toDate ? toDateStr(f.toDate) : undefined,
+  };
 }
 
 export interface RiwayatItemInput {

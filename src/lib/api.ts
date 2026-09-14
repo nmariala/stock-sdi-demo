@@ -3,12 +3,10 @@ import type { Barang, StockRow, Transaksi } from '@/types';
 // ---------------------------------------------------------------------------
 // API client untuk Stock SDI Demo API (Node.js + PostgreSQL Homelab).
 // Base URL dibuat configurable via NEXT_PUBLIC_API_BASE_URL
-// (default dev: http://localhost:3001).
+// (default dev: http://localhost:3101).
 //
-// CATATAN transisi:
-//   - Halaman & komponen SAAT INI masih memakai Supabase (lihat src/lib/stok.ts
-//     dst). File ini disiapkan sebagai pengganti akses database frontend.
-//   - Belum ada halaman yang memakai fungsi di file ini sampai cut-over resmi.
+// SEMUA akses data & auth frontend harus lewat file ini.
+// Batas pagination server: MAX_PAGE_SIZE = 500 (api/utils/validation.js).
 // ---------------------------------------------------------------------------
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:3101').replace(/\/+$/, '');
@@ -195,4 +193,38 @@ export interface CreateTransaksiInput {
 
 export function createTransaksi(input: CreateTransaksiInput): Promise<TransaksiApi> {
   return request<{ data: TransaksiApi }>('/api/transaksi', { method: 'POST', body: JSON.stringify(input) }).then((r) => r.data);
+}
+
+// ---------------------------------------------------------------------------
+// Helper error UX
+// ---------------------------------------------------------------------------
+
+// Pesan ramah user untuk ApiError umum (401/403/429/network/5xx).
+export function getApiErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) {
+    switch (err.code) {
+      case 'UNAUTHORIZED':
+        return 'Sesi Anda sudah berakhir. Silakan masuk kembali.';
+      case 'FORBIDDEN':
+        return 'Anda tidak memiliki izin untuk melakukan tindakan ini.';
+      case 'RATE_LIMITED':
+        return 'Terlalu banyak permintaan. Silakan coba lagi beberapa saat.';
+      case 'DATABASE_ERROR':
+        return 'Tidak dapat terhubung ke server aplikasi. Coba lagi.';
+      case 'VALIDATION_ERROR':
+        return err.message || 'Data yang dikirim tidak valid.';
+      case 'DUPLICATE_TRANSACTION':
+      case 'DUPLICATE_NAME':
+        return err.message || 'Data sudah tercatat.';
+      case 'INSUFFICIENT_STOCK':
+        return err.message || 'Stok tidak mencukupi untuk transaksi keluar.';
+      case 'FOREIGN_KEY_ERROR':
+        return err.message || 'Data tidak bisa diubah karena masih dipakai data lain.';
+      case 'NOT_FOUND':
+        return err.message || 'Data tidak ditemukan.';
+      default:
+        return err.message || fallback;
+    }
+  }
+  return fallback;
 }

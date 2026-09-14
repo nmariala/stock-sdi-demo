@@ -1,11 +1,11 @@
 'use client';
 
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { supabase } from '@/lib/supabase';
+import { getBarangList, getTransaksi, getTransaksiBalanceBefore, ApiError, getApiErrorMessage } from '@/lib/api';
+import type { TransaksiApi } from '@/lib/api';
 import { GUDANG, KRITERIA } from '@/lib/konstanta';
 import { formatQuantity } from '@/lib/format';
 import {
-  TRANS_SELECT,
   EXPORT_BATCH,
   EXPORT_MAX_ROWS,
   EXPORT_TOO_MANY_MESSAGE,
@@ -14,23 +14,13 @@ import {
   dateFromYMD,
   buildExportFileName,
   attachStockBalances,
-  applyRiwayatFilters,
+  toTransaksiParams,
 } from '@/lib/riwayatExport';
-import type { RiwayatItemInput } from '@/lib/riwayatExport';
-import type { Barang } from '@/types';
+import type { Barang, Transaksi } from '@/types';
 
-interface RiwayatRow {
-  id: number;
-  barang_id: number;
-  jenis: 'masuk' | 'keluar';
-  jumlah: number;
-  warehouse: string;
-  kriteria: string;
-  keterangan: string | null;
-  created_at: string;
-  user_id: string | null;
-  diupdate_oleh: string;
-  nama: string;
+interface RiwayatRow extends Transaksi {
+  barang_nama: string | null;
+  user_nama: string | null;
 }
 
 const PAGE_SIZE = 50;
@@ -46,9 +36,9 @@ function formatDate(iso: string): string {
 
 export default function RiwayatPage() {
   const [rows, setRows] = useState<RiwayatRow[]>([]);
+  const [total, setTotal] = useState(0);
   const [barangList, setBarangList] = useState<Barang[]>([]);
-  const [profileById, setProfileById] = useState<Record<string, string>>({});
-  const [profilesLoaded, setProfilesLoaded] = useState(false);
+  const [barangLoaded, setBarangLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [gudangFilter, setGudangFilter] = useState('all');
@@ -59,8 +49,7 @@ export default function RiwayatPage() {
   const [toDate, setToDate] = useState<Date | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportMsg, setExportMsg] = useState('');
-  const [page, setPage] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
+  const [page, setPage] = useState(1);
   const [loadingMore, setLoadingMore] = useState(false);
 
   const barangById = useMemo(() => {
@@ -75,103 +64,66 @@ export default function RiwayatPage() {
     return m;
   }, [barangList]);
 
-  const profileObjById = useMemo(() => {
-    const m: Record<string, { nama: string }> = {};
-    Object.entries(profileById).forEach(([id, nama]) => { m[id] = { nama }; });
-    return m;
-  }, [profileById]);
-
-  const loadBarang = useCallback(async () => {
-    const { data, error } = await supabase.from('barang').select('id, nama').order('nama');
-    if (!error && Array.isArray(data)) {
-      setBarangList(data.map((b) => ({ id: Number(b.id), nama: String(b.nama), stok: 0 })));
-    }
-  }, []);
-
-  const loadProfiles = useCallback(async () => {
-    try {
-      const { data, error } = await supabase.from('profiles').select('id, nama');
-      if (!error && Array.isArray(data)) {
-        const map: Record<string, string> = {};
-        data.forEach((p) => {
-          if (p && typeof p.id === 'string' && p.nama != null) map[p.id] = String(p.nama);
-        });
-        setProfileById(map);
-      }
-    } finally {
-      setProfilesLoaded(true);
-    }
-  }, []);
-
-  const buildBaseQuery = useCallback(() => {
-    const q = supabase
-      .from('transaksi')
-      .select(TRANS_SELECT)
-      .order('created_at', { ascending: false })
-      .order('id', { ascending: false });
-    return applyRiwayatFilters(q, {
-      gudang: gudangFilter,
-      kriteria: kriteriaFilter,
-      jenis: jenisFilter,
-      barangId: barangFilter,
-      fromDate,
-      toDate,
-    });
-  }, [gudangFilter, kriteriaFilter, jenisFilter, barangFilter, fromDate, toDate]);
-
-  const buildCountQuery = useCallback(() => {
-    const q = supabase.from('transaksi').select('id', { count: 'exact', head: true });
-    return applyRiwayatFilters(q, {
-      gudang: gudangFilter,
-      kriteria: kriteriaFilter,
-      jenis: jenisFilter,
-      barangId: barangFilter,
-      fromDate,
-      toDate,
-    });
-  }, [gudangFilter, kriteriaFilter, jenisFilter, barangFilter, fromDate, toDate]);
-
-  const buildQuery = useCallback(
-    (p: number) => {
-      return buildBaseQuery().range(p * PAGE_SIZE, p * PAGE_SIZE + PAGE_SIZE - 1);
-    },
-    [buildBaseQuery]
+  const params = useMemo(
+    () =>
+      toTransaksiParams({
+        gudang: gudangFilter,
+        kriteria: kriteriaFilter,
+        jenis: jenisFilter,
+        barangId: barangFilter,
+        fromDate,
+        toDate,
+      }),
+    [gudangFilter, kriteriaFilter, jenisFilter, barangFilter, fromDate, toDate]
   );
 
-  const loadFirstPage = useCallback(async ({ showError = true } = {}) => {
-    setLoading(true);
+  const loadBarang = useCallback(async () => {
     try {
-      const { data, error } = await buildQuery(0);
-      if (error) throw error;
-      const list: RiwayatRow[] = (Array.isArray(data) ? data : []).filter(Boolean).map((r) => ({
-        ...r,
-        user_id: r.user_id != null ? String(r.user_id) : null,
-        diupdate_oleh: r.user_id != null ? (profileById[r.user_id] ?? '-') : '-',
-        nama: barangById[r.barang_id] ?? '(barang tidak ditemukan)',
-      }));
-      setRows(list);
-      setPage(0);
-      setHasMore(list.length === PAGE_SIZE);
-      setError('');
+      const res = await getBarangList({ sort: 'nama', order: 'asc', pageSize: 500 });
+      if (Array.isArray(res.data)) {
+        setBarangList(res.data.map((b) => ({ id: Number(b.id), nama: String(b.nama), stok: Number(b.stok) || 0 })));
+      }
     } catch {
-      if (showError) setError('Gagal memuat riwayat transaksi');
+      // tanpa daftar barang, kolom filter barang tetap terbuka; list halaman
+      // memakai barang_nama langsung dari API
     } finally {
-      setLoading(false);
+      setBarangLoaded(true);
     }
-  }, [buildQuery, barangById, profileById]);
+  }, []);
+
+  const toRow = useCallback(
+    (r: TransaksiApi): RiwayatRow => ({
+      ...r,
+      user_id: r.user_id != null ? String(r.user_id) : '',
+    }),
+    []
+  );
+
+  const loadFirstPage = useCallback(
+    async ({ showError = true, silent = false } = {}) => {
+      if (!silent) setLoading(true);
+      try {
+        const res = await getTransaksi({ ...params, page: 1, pageSize: PAGE_SIZE });
+        const list: RiwayatRow[] = (Array.isArray(res.data) ? res.data : []).filter(Boolean).map(toRow);
+        setRows(list);
+        setTotal(res.total || 0);
+        setPage(1);
+        setError('');
+      } catch (err) {
+        if (showError) setError(getApiErrorMessage(err, 'Gagal memuat riwayat transaksi'));
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [params, toRow]
+  );
 
   const loadMore = useCallback(async () => {
-    if (loadingMore || !hasMore) return;
+    if (loadingMore || rows.length >= total) return;
     setLoadingMore(true);
     try {
-      const { data, error } = await buildQuery(page + 1);
-      if (error) throw error;
-      const list: RiwayatRow[] = (Array.isArray(data) ? data : []).filter(Boolean).map((r) => ({
-        ...r,
-        user_id: r.user_id != null ? String(r.user_id) : null,
-        diupdate_oleh: r.user_id != null ? (profileById[r.user_id] ?? '-') : '-',
-        nama: barangById[r.barang_id] ?? '(barang tidak ditemukan)',
-      }));
+      const res = await getTransaksi({ ...params, page: page + 1, pageSize: PAGE_SIZE });
+      const list: RiwayatRow[] = (Array.isArray(res.data) ? res.data : []).filter(Boolean).map(toRow);
       setRows((prev) => {
         const seen = new Set(prev.map((r) => r.id));
         const merged = [...prev];
@@ -183,46 +135,44 @@ export default function RiwayatPage() {
         });
         return merged;
       });
+      setTotal(res.total || 0);
       setPage(page + 1);
-      setHasMore(list.length === PAGE_SIZE);
-    } catch {
-      setError('Gagal memuat lebih banyak data');
+    } catch (err) {
+      setError(getApiErrorMessage(err, 'Gagal memuat lebih banyak data'));
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, hasMore, page, buildQuery, barangById, profileById]);
+  }, [loadingMore, rows.length, total, page, params, toRow]);
 
   useEffect(() => {
     loadBarang();
-    loadProfiles();
-  }, [loadBarang, loadProfiles]);
+  }, [loadBarang]);
 
   useEffect(() => {
-    if (barangList.length > 0 && profilesLoaded) {
-      loadFirstPage();
+    if (barangLoaded) {
+      loadFirstPage({ silent: false, showError: false });
     }
-  }, [barangList, profilesLoaded, loadFirstPage]);
+  }, [params, barangLoaded, loadFirstPage]);
 
   useEffect(() => {
-    const channel = supabase
-      .channel('riwayat-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'transaksi' }, () => {
-        loadFirstPage({ showError: false });
-      })
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [loadFirstPage]);
+    if (!barangLoaded) return;
+    // Supabase realtime tidak dipakai lagi. Polling ringan (60 dtk) tanpa
+    // spinner agar data baru muncul setelah transaksi dari halaman lain.
+    const poll = window.setInterval(() => loadFirstPage({ silent: true, showError: false }), 60_000);
+    return () => window.clearInterval(poll);
+  }, [barangLoaded, loadFirstPage]);
 
-  const getBase = useCallback(async (bid: number, created_at: string, id: number) => {
-    const { data, error } = await supabase.rpc('riwayat_balance_before', {
-      p_barang_id: bid,
-      p_created_at: created_at,
-      p_id: id,
-    });
-    if (error) {
-      throw new Error('Fungsi riwayat_balance_before belum dibuat di Supabase. Jalankan SQL di file migrasi_riwayat_skala.sql.');
+  const getBase = useCallback(async (bid: number, _created_at: string, id: number) => {
+    try {
+      const res = await getTransaksiBalanceBefore(id);
+      return Number(res.balance_before) || 0;
+    } catch {
+      if (bid >= 0) {
+        // fallback: saldo tidak tersedia -> 0 (export tetap jalan)
+        return 0;
+      }
+      return 0;
     }
-    return Number(data) || 0;
   }, []);
 
   const doExport = useCallback(async () => {
@@ -232,27 +182,30 @@ export default function RiwayatPage() {
     try {
       const XLSX = await import('xlsx');
 
-      const { count } = await buildCountQuery();
-      if (typeof count === 'number' && count > EXPORT_MAX_ROWS) {
+      const first = await getTransaksi({ ...params, page: 1, pageSize: EXPORT_BATCH });
+      if (!first || typeof first.total !== 'number' || first.total > EXPORT_MAX_ROWS) {
         throw new Error(EXPORT_TOO_MANY_MESSAGE);
       }
 
-      const all: RiwayatItemInput[] = [];
-      let from = 0;
-      for (;;) {
-        const { data, error } = await buildBaseQuery().range(from, from + EXPORT_BATCH - 1);
-        if (error) throw error;
-        const chunk = Array.isArray(data) ? data : [];
-        all.push(...(chunk as RiwayatItemInput[]));
-        if (chunk.length < EXPORT_BATCH) break;
+      const all: TransaksiApi[] = [];
+      all.push(...(first.data as TransaksiApi[]));
+      while (all.length < first.total) {
+        const nextPage = Math.floor(all.length / EXPORT_BATCH) + 1;
+        const res = await getTransaksi({ ...params, page: nextPage, pageSize: EXPORT_BATCH });
+        all.push(...(res.data as TransaksiApi[]));
         if (all.length > EXPORT_MAX_ROWS) throw new Error(EXPORT_TOO_MANY_MESSAGE);
-        from += EXPORT_BATCH;
       }
+
+      // peta user untuk kolom "User" pada export (dari data join API).
+      const profileById: Record<string, { nama: string }> = {};
+      all.forEach((r) => {
+        if (r.user_id && r.user_nama) profileById[r.user_id] = { nama: r.user_nama };
+      });
 
       const items = await attachStockBalances(all, {
         getBase,
         barangById: barangObjById,
-        profileById: profileObjById,
+        profileById,
       });
 
       if (!items.length) {
@@ -305,13 +258,15 @@ export default function RiwayatPage() {
       const msg = e instanceof Error ? e.message : '';
       if (msg === EXPORT_TOO_MANY_MESSAGE) {
         setExportMsg(`Export dibatalkan. ${msg}`);
+      } else if (e instanceof ApiError) {
+        setExportMsg(`Export Excel gagal. ${getApiErrorMessage(e, 'Silakan coba lagi.')}`);
       } else {
         setExportMsg(`Export Excel gagal. Silakan coba lagi.${msg ? ` ${msg}` : ''}`);
       }
     } finally {
       setExporting(false);
     }
-  }, [exporting, buildCountQuery, buildBaseQuery, getBase, barangObjById, profileObjById, fromDate, toDate, barangFilter]);
+  }, [exporting, params, getBase, barangObjById, fromDate, toDate, barangFilter]);
 
   const hasActiveFilter =
     gudangFilter !== 'all' ||
@@ -464,7 +419,7 @@ export default function RiwayatPage() {
                       <tr key={r.id} className="border-b border-slate-100 hover:bg-slate-50">
                         <td className="px-4 py-3 text-slate-400">{i + 1}</td>
                         <td className="whitespace-nowrap px-4 py-3 text-slate-600">{formatDate(r.created_at)}</td>
-                        <td className="px-4 py-3 font-medium text-slate-900">{r.nama}</td>
+                        <td className="px-4 py-3 font-medium text-slate-900">{r.barang_nama ?? barangById[r.barang_id] ?? '(barang tidak ditemukan)'}</td>
                         <td className="px-4 py-3">
                           <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${masuk ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
                             {masuk ? 'Masuk' : 'Keluar'}
@@ -476,7 +431,7 @@ export default function RiwayatPage() {
                         <td className="px-4 py-3 text-slate-700">{r.warehouse}</td>
                         <td className="px-4 py-3 text-slate-700">{r.kriteria}</td>
                         <td className="px-4 py-3 text-slate-500">{r.keterangan || '-'}</td>
-                        <td className="px-4 py-3 text-slate-600">{r.diupdate_oleh}</td>
+                        <td className="px-4 py-3 text-slate-600">{r.user_nama || '-'}</td>
                       </tr>
                     );
                   })
@@ -486,7 +441,7 @@ export default function RiwayatPage() {
           </div>
           {rows.length > 0 && (
             <div className="border-t border-slate-100 px-4 py-3">
-              {hasMore ? (
+              {rows.length < total ? (
                 <button
                   onClick={loadMore}
                   disabled={loadingMore}

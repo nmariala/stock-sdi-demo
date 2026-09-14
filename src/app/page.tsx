@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { supabase } from '@/lib/supabase';
 import { fetchStockRows } from '@/lib/stok';
 import { GUDANG, KRITERIA } from '@/lib/konstanta';
 import { formatQuantity } from '@/lib/format';
@@ -38,14 +37,10 @@ export default function StokPage() {
 
   useEffect(() => {
     load();
-    const channel = supabase
-      .channel('stok-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'barang' }, () => load())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'stock_levels' }, () => load())
-      .subscribe();
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    // Supabase realtime tidak dipakai lagi. Polling ringan (60 dtk) menjaga
+    // data stok tetap segar tanpa websocket (hemat resource).
+    const poll = window.setInterval(load, 60_000);
+    return () => window.clearInterval(poll);
   }, [load]);
 
   const filtered = useMemo(() => {
